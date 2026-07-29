@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying paper."
+title: "The Joinless Partition Pattern: reference implementation and benchmarks"
+authors:
+  - family-names: Jaime
+    given-names: "Ruben Alejandro"
+    affiliation: "Facultad de Informatica, Universidad Nacional de La Plata (UNLP), Argentina"
+    orcid: "https://orcid.org/0009-0009-9470-5645"
+license: MIT
+repository-code: "https://github.com/USUARIO/joinless-partition-pattern"
+preferred-citation:
+  type: article
+  title: "The Joinless Partition Pattern: A Spark-Native Physical Execution Pattern for Multi-Dimensional Aggregations in Apache Spark"
+  authors:
+    - family-names: Jaime
+      given-names: "Ruben Alejandro"
+      orcid: "https://orcid.org/0009-0009-9470-5645"
+  journal: "Distributed and Parallel Databases"
+  year: 2026
+  notes: "Under review"
