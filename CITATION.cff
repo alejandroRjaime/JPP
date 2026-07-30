@@ -7,7 +7,7 @@ authors:
     affiliation: "Facultad de Informatica, Universidad Nacional de La Plata (UNLP), Argentina"
     orcid: "https://orcid.org/0009-0009-9470-5645"
 license: MIT
-repository-code: "https://github.com/USUARIO/joinless-partition-pattern"
+repository-code: "https://github.com/alejandroRjaime/JPP"
 preferred-citation:
   type: article
   title: "The Joinless Partition Pattern: A Spark-Native Physical Execution Pattern for Multi-Dimensional Aggregations in Apache Spark"

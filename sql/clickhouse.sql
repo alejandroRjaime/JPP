@@ -27,7 +27,7 @@ CREATE TABLE lineorder ENGINE = MergeTree ORDER BY lo_orderdate AS
 -- Match the thread budget of the other engines.
 SET max_threads = 16;
 
--- The benchmark query: four-dimension star-schema aggregation.
+-- Q1 of the query set. Q2-Q4 are in queries.sql.
 SELECT d.d_year, c.c_nation, sum(lo.amount) AS total
 FROM lineorder lo
 JOIN customer  c ON lo.lo_custkey   = c.c_custkey
