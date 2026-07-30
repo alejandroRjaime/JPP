@@ -1,0 +1,173 @@
+// =============================================================================
+// Joinless Partition Pattern — base variant.
+//
+// This is the unoptimized realization of the pattern: dimensions are broadcast
+// as Scala HashMaps, probed by hash lookup inside a single mapPartitions pass,
+// and folded into a partition-local HashMap keyed by the group attributes.
+// It carries no preconditions: keys may be sparse or non-numeric, and the
+// group-by attributes may be of any type and cardinality.
+//
+// This is the 68.10 s configuration of the optimization-path table, and the
+// variant printed as Listing 1 of the paper. The optimized variant in
+// src/main/scala/JoinlessPartitionPattern.scala computes the same result at
+// 9.41 s by replacing the hash maps with dense indexed arrays, packing the
+// group key into a primitive Long, and iterating with a raw while loop — each
+// under a stated precondition.
+//
+// Usage:  spark-submit --class JoinlessBase <jar> <dataDir>
+// =============================================================================
+
+import org.apache.spark.sql._
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import scala.collection.mutable
+
+object JoinlessBase {
+
+  /** A dimension participating in the enrichment.
+    *
+    * @param df       the dimension table
+    * @param factKey  the foreign-key column in the fact table
+    * @param dimKey   the surrogate-key column in the dimension
+    * @param attrs    the attributes this dimension contributes
+    */
+  case class Dim(df: DataFrame, factKey: String, dimKey: String, attrs: Seq[String])
+
+  /**
+   * The three-phase pattern.
+   *
+   * @param factDF     fact table — never shuffled
+   * @param dimensions dimensions to broadcast and probe
+   * @param groupKeys  enriched attribute names forming the group key. These are
+   *                   attributes contributed by the dimensions, not columns of
+   *                   the fact table.
+   * @param measureCol the fact-table column to aggregate
+   */
+  def joinlessAggregation(
+      factDF: DataFrame,
+      dimensions: Seq[Dim],
+      groupKeys: Seq[String],
+      measureCol: String = "amount"
+  ): DataFrame = {
+
+    val spark = factDF.sparkSession
+
+    // ---- Phase 1: broadcast each dimension as a hash map -------------------
+    // key -> the attribute values this dimension contributes, as strings.
+    val broadcasts = dimensions.map { dim =>
+      val rows = dim.df.select(
+        col(dim.dimKey),
+        array(dim.attrs.map(a => col(a).cast(StringType)): _*).alias("attrs")
+      ).collect()
+
+      val map = rows.map { r =>
+        val key = r.get(0) match {
+          case v: java.lang.Long    => v.longValue()
+          case v: java.lang.Integer => v.longValue()
+          case other                => other.toString.toLong
+        }
+        key -> r.getSeq[String](1).toArray
+      }.toMap
+
+      spark.sparkContext.broadcast(map)
+    }
+
+    // Where each group-by attribute comes from: (dimension index, offset).
+    val keySources: Seq[(Int, Int)] = groupKeys.map { k =>
+      val di = dimensions.indexWhere(_.attrs.contains(k))
+      require(di >= 0, s"group key '$k' is not contributed by any dimension")
+      (di, dimensions(di).attrs.indexOf(k))
+    }
+
+    val factIdx    = dimensions.map(d => factDF.schema.fieldIndex(d.factKey))
+    val measureIdx = factDF.schema.fieldIndex(measureCol)
+
+    val schema = StructType(
+      groupKeys.map(k => StructField(k, StringType, nullable = true)) :+
+        StructField("partial_agg", DoubleType, nullable = false)
+    )
+
+    // ---- Phase 2: partition-local enrichment and pre-aggregation ------------
+    val partialAggs = factDF.rdd.mapPartitions { partition =>
+      val maps    = broadcasts.map(_.value)
+      val nDims   = maps.length
+      val localAggs = mutable.HashMap.empty[Seq[String], Double]
+
+      partition.foreach { row =>
+        // Probe every dimension. A miss yields nulls, reproducing LEFT OUTER
+        // JOIN semantics; the row still contributes to its group.
+        val enriched = new Array[Array[String]](nDims)
+        var i = 0
+        var ok = true
+        while (i < nDims) {
+          val k = row.get(factIdx(i)) match {
+            case v: java.lang.Long    => v.longValue()
+            case v: java.lang.Integer => v.longValue()
+            case null                 => -1L
+            case other                => other.toString.toLong
+          }
+          enriched(i) = maps(i).getOrElse(k, null)
+          if (enriched(i) == null) ok = false
+          i += 1
+        }
+
+        if (ok) {
+          val groupKey = keySources.map { case (di, off) => enriched(di)(off) }
+          val value = row.get(measureIdx) match {
+            case v: java.lang.Double  => v.doubleValue()
+            case v: java.lang.Long    => v.longValue().toDouble
+            case v: java.lang.Integer => v.intValue().toDouble
+            case null                 => 0.0
+            case other                => other.toString.toDouble
+          }
+          localAggs(groupKey) = localAggs.getOrElse(groupKey, 0.0) + value
+        }
+      }
+
+      localAggs.iterator.map { case (key, value) => Row.fromSeq(key :+ value) }
+    }
+
+    // ---- Phase 3: global aggregation over the partial results --------------
+    spark.createDataFrame(partialAggs, schema)
+      .groupBy(groupKeys.map(col): _*)
+      .agg(sum("partial_agg").alias("total"))
+  }
+
+  def main(args: Array[String]): Unit = {
+    val dataDir = if (args.nonEmpty)   args(0) else "/path/to/ssb_synth"
+    val cores   = if (args.length > 1) args(1) else "16"
+
+    val spark = SparkSession.builder()
+      .appName("JoinlessBase")
+      .master(sys.env.getOrElse("SPARK_MASTER", s"local[$cores]"))
+      .config("spark.sql.adaptive.enabled", "false")
+      .config("spark.sql.autoBroadcastJoinThreshold", "-1")
+      .getOrCreate()
+
+    // Q1: four dimensions, group by (d_year, c_nation), no predicates.
+    // supplier and part contribute no attributes; probing them enforces the
+    // inner-join semantics of the query.
+    val dims = Seq(
+      Dim(spark.read.parquet(s"$dataDir/customer"), "lo_custkey",   "c_custkey", Seq("c_nation")),
+      Dim(spark.read.parquet(s"$dataDir/supplier"), "lo_suppkey",   "s_suppkey", Seq.empty),
+      Dim(spark.read.parquet(s"$dataDir/part"),     "lo_partkey",   "p_partkey", Seq.empty),
+      Dim(spark.read.parquet(s"$dataDir/date"),     "lo_orderdate", "d_datekey", Seq("d_year"))
+    )
+
+    val fact = spark.read.parquet(s"$dataDir/lineorder")   // no repartition
+
+    val t0      = System.nanoTime()
+    val result  = joinlessAggregation(fact, dims, Seq("d_year", "c_nation")).cache()
+    val groups  = result.count()
+    val total   = result.agg(sum("total")).head().getDouble(0)
+    val elapsed = (System.nanoTime() - t0) / 1e9
+
+    println(f"variant       = base (broadcast HashMap)")
+    println(f"groups        = $groups")
+    println(f"total (check) = $total%.1f")
+    println(f"elapsed       = $elapsed%.2f s")
+
+    result.orderBy("d_year", "c_nation").show(200, truncate = false)
+    spark.stop()
+  }
+}

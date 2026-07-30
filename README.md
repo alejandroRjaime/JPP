@@ -18,7 +18,7 @@ pre-aggregation, so that only compact partial aggregates are shuffled.
 | `src/main/scala/JoinlessQueries.scala` | The pattern over the four-query benchmark set |
 | `baselines/SparkBaselines.scala` | Sort-Merge and Broadcast Hash Join baselines (Q1) |
 | `baselines/SparkBaselineQueries.scala` | The same baselines over the full query set |
-| `baselines/JoinlessBase.scala` | *Not yet added* — base `HashMap` variant, the 68.10 s configuration |
+| `baselines/JoinlessBase.scala` | Base `HashMap` variant — the 68.10 s configuration |
 | `sql/queries.sql` | The four benchmark queries |
 | `sql/clickhouse.sql` | ClickHouse schema and load |
 | `sql/duckdb.sql` | DuckDB schema and load |

@@ -35,20 +35,29 @@ object GenerateSSB {
     val nNation = 25
 
     // --- dimensions: dense surrogate keys ---
+    // Regions and manufacturers carry the predicates of Q2 and Q3. They live only on
+    // the dimensions, so the query set can be extended without regenerating the 24 GB
+    // fact table: rerun with --dims-only to rewrite the dimensions alone.
+    val regions = Array("AMERICA", "ASIA", "EUROPE", "AFRICA", "MIDDLE EAST")
+    val mfgrs   = Array("MFGR#1", "MFGR#2", "MFGR#3", "MFGR#4", "MFGR#5")
+
     spark.range(0, nCust)
       .withColumn("c_custkey", $"id")
       .withColumn("c_nation", ($"id" % nNation).cast("string"))
-      .select("c_custkey", "c_nation")
+      .withColumn("c_region", element_at(lit(regions), (($"id" % 5) + 1).cast("int")))
+      .select("c_custkey", "c_nation", "c_region")
       .write.mode("overwrite").parquet(s"$outDir/customer")
 
     spark.range(0, nSupp)
       .withColumn("s_suppkey", $"id")
-      .select("s_suppkey")
+      .withColumn("s_region", element_at(lit(regions), (($"id" % 5) + 1).cast("int")))
+      .select("s_suppkey", "s_region")
       .write.mode("overwrite").parquet(s"$outDir/supplier")
 
     spark.range(0, nPart)
       .withColumn("p_partkey", $"id")
-      .select("p_partkey")
+      .withColumn("p_mfgr", element_at(lit(mfgrs), (($"id" % 5) + 1).cast("int")))
+      .select("p_partkey", "p_mfgr")
       .write.mode("overwrite").parquet(s"$outDir/part")
 
     spark.range(0, nDate)
