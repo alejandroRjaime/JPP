@@ -68,8 +68,24 @@ object SparkBaselineQueries {
           .join(d(t), lo("lo_orderdate") === t("d_datekey"))
           .groupBy("d_year", "c_nation").agg(sum("amount").alias("total"))
 
+      case "q5" =>
+        // Q1 restricted to one year over the year-partitioned fact table.
+        // The predicate is on the partitioning key, so the scan prunes; the
+        // joins that follow still redistribute whatever survives.
+        val loPart = spark.read.parquet(s"$dataDir/lineorder_by_year")
+          .filter(col("lo_year") === 1997)
+        val c = spark.read.parquet(s"$dataDir/customer").select("c_custkey", "c_nation")
+        val s2 = spark.read.parquet(s"$dataDir/supplier").select("s_suppkey")
+        val p = spark.read.parquet(s"$dataDir/part").select("p_partkey")
+        val t = spark.read.parquet(s"$dataDir/date").select("d_datekey", "d_year")
+        loPart.join(d(c),  loPart("lo_custkey")   === c("c_custkey"))
+              .join(d(s2), loPart("lo_suppkey")   === s2("s_suppkey"))
+              .join(d(p),  loPart("lo_partkey")   === p("p_partkey"))
+              .join(d(t),  loPart("lo_orderdate") === t("d_datekey"))
+              .groupBy("d_year", "c_nation").agg(sum("amount").alias("total"))
+
       case other =>
-        throw new IllegalArgumentException(s"unknown query: $other (expected q1..q4)")
+        throw new IllegalArgumentException(s"unknown query: $other (expected q1..q5)")
     }
   }
 

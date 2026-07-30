@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Launcher for every benchmark run. Fixes the environment once so that no
+# configuration depends on shell variables surviving between commands.
+#
+#   ./scripts/jpp JoinlessQueries      ~/ssb_synth q1
+#   ./scripts/jpp SparkBaselineQueries ~/ssb_synth q1 smj
+#   ./scripts/jpp JoinlessQueries      s3a://ssb-benchmark/sf600 q1     # remote
+#
+# Environment it sets, and why each is needed on a hardened host:
+#
+#   SPARK_SUBMIT_OPTS   reaches the launcher JVM, which in local mode *is* the
+#                       driver. Unlike spark.driver.extraJavaOptions it applies
+#                       unconditionally, including under spark-shell.
+#   snappy.tempdir      Snappy extracts a native library and maps it executable;
+#                       that fails when /tmp is mounted noexec.
+#   java.io.tmpdir      keeps JVM temporaries off a small tmpfs.
+#   spark.local.dir     shuffle spill. The Sort-Merge Join baseline redistributes
+#                       the fact table once per dimension and needs real disk.
+#   fs.s3a.buffer.dir   S3A stages uploads and downloads on local disk before
+#                       sending them over the network.
+
+set -euo pipefail
+
+CLASS="${1:?usage: jpp <Class> <dataDir> [args...]}"
+shift
+
+JPP_TMP="${JPP_TMP:-$HOME/spark-tmp}"
+SNAPPY_TMP="${SNAPPY_TMP:-$HOME/tmp}"
+CORES="${CORES:-16}"
+DRIVER_MEM="${DRIVER_MEM:-32g}"
+JAR="${JAR:-target/scala-2.12/jpp_2.12-1.0.jar}"
+
+# MinIO endpoint and credentials. Override in the environment; do not commit
+# real credentials to this file.
+S3_ENDPOINT="${S3_ENDPOINT:-http://192.168.1.37:9010}"
+S3_KEY="${S3_KEY:-minioadmin}"
+S3_SECRET="${S3_SECRET:-}"
+
+mkdir -p "$JPP_TMP/s3a" "$SNAPPY_TMP"
+
+if [[ ! -f "$JAR" ]]; then
+  echo "jar not found: $JAR   (run: sbt package)" >&2
+  exit 1
+fi
+
+# Applies to the launcher JVM, which is the driver in local mode.
+export SPARK_SUBMIT_OPTS="-Dorg.xerial.snappy.tempdir=$SNAPPY_TMP -Djava.io.tmpdir=$JPP_TMP"
+export SPARK_LOCAL_DIRS="$JPP_TMP"
+
+JAVA_OPTS="-Dorg.xerial.snappy.tempdir=$SNAPPY_TMP -Djava.io.tmpdir=$JPP_TMP"
+
+ARGS=(
+  --class "$CLASS"
+  --master "local[$CORES]"
+  --driver-memory "$DRIVER_MEM"
+  --conf spark.log.level=WARN
+  --conf spark.sql.adaptive.enabled=false
+  --conf "spark.local.dir=$JPP_TMP"
+  --conf "spark.driver.extraJavaOptions=$JAVA_OPTS"
+  --conf "spark.executor.extraJavaOptions=$JAVA_OPTS"
+)
+
+# S3A configuration is added only when a remote path is involved, so local runs
+# are not affected by it.
+if [[ "${1:-}" == s3a://* ]]; then
+  if [[ -z "$S3_SECRET" ]]; then
+    echo "set S3_SECRET before running against $1" >&2
+    exit 1
+  fi
+  ARGS+=(
+    --conf "spark.hadoop.fs.s3a.endpoint=$S3_ENDPOINT"
+    --conf "spark.hadoop.fs.s3a.access.key=$S3_KEY"
+    --conf "spark.hadoop.fs.s3a.secret.key=$S3_SECRET"
+    --conf spark.hadoop.fs.s3a.path.style.access=true
+    --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+    --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+    --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+    --conf "spark.hadoop.fs.s3a.buffer.dir=$JPP_TMP/s3a"
+    --conf spark.hadoop.fs.s3a.fast.upload=true
+    --conf spark.hadoop.fs.s3a.connection.maximum=64
+    --conf spark.hadoop.fs.s3a.experimental.input.fadvise=sequential
+  )
+fi
+
+exec spark-submit "${ARGS[@]}" "$JAR" "$@"

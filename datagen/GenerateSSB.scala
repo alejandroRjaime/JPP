@@ -17,9 +17,11 @@ import org.apache.spark.sql.functions._
 object GenerateSSB {
 
   def main(args: Array[String]): Unit = {
-    val outDir  = if (args.nonEmpty)   args(0) else "/path/to/ssb_synth"
-    val factRows = if (args.length > 1) args(1).toLong else 600000000L
-    val files    = if (args.length > 2) args(2).toInt  else 96
+    val outDir   = if (args.nonEmpty)   args(0) else "/path/to/ssb_synth"
+    val dimsOnly = args.contains("--dims-only")
+    val rest     = args.drop(1).filterNot(_.startsWith("--"))
+    val factRows = if (rest.length > 0) rest(0).toLong else 600000000L
+    val files    = if (rest.length > 1) rest(1).toInt  else 96
 
     val spark = SparkSession.builder()
       .appName("GenerateSSB")
@@ -41,9 +43,19 @@ object GenerateSSB {
     val regions = Array("AMERICA", "ASIA", "EUROPE", "AFRICA", "MIDDLE EAST")
     val mfgrs   = Array("MFGR#1", "MFGR#2", "MFGR#3", "MFGR#4", "MFGR#5")
 
+    // The 25 nation names of the TPC-H / SSB reference schema. Using names
+    // rather than numeric codes exercises the dictionary-encoding path of the
+    // indexed-array lookup, which is what a non-synthetic dimension requires.
+    val nations = Array(
+      "ALGERIA", "ARGENTINA", "BRAZIL", "CANADA", "CHINA",
+      "EGYPT", "ETHIOPIA", "FRANCE", "GERMANY", "INDIA",
+      "INDONESIA", "IRAN", "IRAQ", "JAPAN", "JORDAN",
+      "KENYA", "MOROCCO", "MOZAMBIQUE", "PERU", "ROMANIA",
+      "RUSSIA", "SAUDI ARABIA", "UNITED KINGDOM", "UNITED STATES", "VIETNAM")
+
     spark.range(0, nCust)
       .withColumn("c_custkey", $"id")
-      .withColumn("c_nation", ($"id" % nNation).cast("string"))
+      .withColumn("c_nation", element_at(lit(nations), (($"id" % nNation) + 1).cast("int")))
       .withColumn("c_region", element_at(lit(regions), (($"id" % 5) + 1).cast("int")))
       .select("c_custkey", "c_nation", "c_region")
       .write.mode("overwrite").parquet(s"$outDir/customer")
@@ -67,6 +79,9 @@ object GenerateSSB {
       .write.mode("overwrite").parquet(s"$outDir/date")
 
     // --- fact table: uniformly distributed foreign keys ---
+    // Skipped with --dims-only: the predicate attributes of Q2 and Q3 live on
+    // the dimensions, so the query set can be extended without rewriting 24 GB.
+    if (!dimsOnly) {
     // Written as `files` files of roughly equal size so that the benchmark does
     // not need to repartition inside the measured region.
     spark.range(0, factRows)
@@ -78,8 +93,10 @@ object GenerateSSB {
       .withColumn("amount",       (($"id" % 10000) + 1).cast("double"))
       .select("lo_custkey", "lo_suppkey", "lo_partkey", "lo_orderdate", "amount")
       .write.mode("overwrite").parquet(s"$outDir/lineorder")
+    }
 
-    println(s"written to $outDir")
+    println(if (dimsOnly) s"dimensions rewritten in $outDir (fact table untouched)"
+            else s"written to $outDir")
     spark.stop()
   }
 }

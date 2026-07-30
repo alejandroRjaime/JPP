@@ -15,12 +15,28 @@ RUNS="${RUNS:-5}"
 CORES="${CORES:-16}"
 DRIVER_MEM="${DRIVER_MEM:-32g}"
 
+# Snappy extracts its native library to a temp directory and maps it executable.
+# On systems where /tmp is mounted noexec that mapping fails, and every Parquet
+# read or write dies with UnsatisfiedLinkError. Point it somewhere executable.
+SNAPPY_TMP="${SNAPPY_TMP:-$HOME/tmp}"
+mkdir -p "$SNAPPY_TMP"
+SNAPPY_OPT="-Dorg.xerial.snappy.tempdir=$SNAPPY_TMP"
+# Spark spills shuffle data to spark.local.dir, which defaults to /tmp. On systems
+# where /tmp is a small tmpfs, the Sort-Merge Join baseline exhausts it within
+# seconds: it redistributes the fact table once per dimension. Point it at real
+# disk with room to spare — budget several times the fact-table size.
+SPARK_TMP="${SPARK_TMP:-$HOME/spark-tmp}"
+mkdir -p "$SPARK_TMP"
+
 [[ -f "$JAR" ]] || { echo "Build first:  sbt package" >&2; exit 1; }
 
 submit () {
   spark-submit --class "$1" --master "local[$CORES]" \
     --driver-memory "$DRIVER_MEM" \
     --conf spark.sql.adaptive.enabled=false \
+    --conf "spark.local.dir=$SPARK_TMP" \
+    --conf "spark.driver.extraJavaOptions=$SNAPPY_OPT" \
+    --conf "spark.executor.extraJavaOptions=$SNAPPY_OPT" \
     "$JAR" "${@:2}"
 }
 

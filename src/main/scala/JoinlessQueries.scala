@@ -28,21 +28,18 @@ object JoinlessQueries {
   private final val NATION_RADIX = 1000L
   private final val MFGR_RADIX   = 100L
 
-  private def getKeyAsInt(row: Row, i: Int): Int = row.get(i) match {
-    case v: java.lang.Long    => v.longValue().toInt
-    case v: java.lang.Integer => v.intValue()
-    case null                 => -1
-    case other =>
-      throw new IllegalArgumentException(s"unsupported key type: ${other.getClass.getName}")
-  }
+  /** Year selected by Q5. Any of the eight years in the generated date
+    * dimension; the choice is arbitrary because the generator distributes
+    * orders uniformly over the range. */
+  final val PRUNE_YEAR = 1997
 
-  private def getDoubleAt(row: Row, i: Int): Double = row.get(i) match {
-    case v: java.lang.Double  => v.doubleValue()
-    case v: java.lang.Long    => v.longValue().toDouble
-    case v: java.lang.Integer => v.intValue().toDouble
-    case null                 => 0.0
-    case other =>
-      throw new IllegalArgumentException(s"unsupported measure type: ${other.getClass.getName}")
+  // The per-row loops below use typed accessors rather than a match on the
+  // boxed value. The tolerant accessors belong in the dimension-building code,
+  // which runs once on the driver over small inputs; here they would cost
+  // several dispatches per fact tuple over hundreds of millions of rows.
+  private def requireTypes(schema: StructType, keys: Seq[String], measure: String): Unit = {
+    keys.foreach(c => require(schema(c).dataType == LongType, s"$c must be LongType"))
+    require(schema(measure).dataType == DoubleType, s"$measure must be DoubleType")
   }
 
   // ---------------------------------------------------------------------------
@@ -64,14 +61,23 @@ object JoinlessQueries {
       StructField("partial_agg", DoubleType,  nullable = false)
     ))
 
-    val fs    = factDF.schema
+    // Project before converting to RDD. `Dataset.rdd` materializes whatever the
+    // plan produces, so without an explicit projection the scan reads every
+    // column of the fact table regardless of which ones the pass touches. On
+    // local NVMe that is invisible; over a storage link it is paid in full.
+    val needed = Seq("lo_custkey", "lo_orderdate", "amount") ++
+      suppOk.map(_ => "lo_suppkey") ++ partOk.map(_ => "lo_partkey")
+    val projected = factDF.select(needed.map(col): _*)
+
+    val fs = projected.schema
+    requireTypes(fs, needed.filterNot(_ == "amount"), "amount")
     val iCust = fs.fieldIndex("lo_custkey")
     val iDate = fs.fieldIndex("lo_orderdate")
     val iAmt  = fs.fieldIndex("amount")
     val iSupp = suppOk.map(_ => fs.fieldIndex("lo_suppkey")).getOrElse(-1)
     val iPart = partOk.map(_ => fs.fieldIndex("lo_partkey")).getOrElse(-1)
 
-    val partials = factDF.rdd.mapPartitions { iter =>
+    val partials = projected.rdd.mapPartitions { iter =>
       val cn = custNation.value
       val dy = dateYear.value
       val so = suppOk.map(_.value).orNull
@@ -80,22 +86,21 @@ object JoinlessQueries {
 
       while (iter.hasNext) {
         val row = iter.next()
-        val ck  = getKeyAsInt(row, iCust)
-        val dk  = getKeyAsInt(row, iDate)
+        val ck  = row.getLong(iCust).toInt
+        val dk  = row.getLong(iDate).toInt
 
         if (ck >= 0 && ck < cn.length && dk >= 0 && dk < dy.length) {
           // Predicates are resolved by the same array probe that would perform
           // the lookup: a non-qualifying row costs one bounds-checked read.
-          val passSupp = (so eq null) || { val k = getKeyAsInt(row, iSupp); k >= 0 && k < so.length && so(k) }
-          val passPart = (po eq null) || { val k = getKeyAsInt(row, iPart); k >= 0 && k < po.length && po(k) }
+          val passSupp = (so eq null) || { val k = row.getLong(iSupp).toInt; k >= 0 && k < so.length && so(k) }
+          val passPart = (po eq null) || { val k = row.getLong(iPart).toInt; k >= 0 && k < po.length && po(k) }
 
           if (passSupp && passPart) {
             val nation = cn(ck)
             val year   = dy(dk)
             if (nation >= 0 && year >= 0) {
-              require(nation < NATION_RADIX, s"nation code $nation exceeds packing radix")
-              val key  = year.toLong * NATION_RADIX + nation.toLong
-              acc.update(key, acc.getOrElse(key, 0.0) + getDoubleAt(row, iAmt))
+              val key = year.toLong * NATION_RADIX + nation.toLong
+              acc.update(key, acc.getOrElse(key, 0.0) + row.getDouble(iAmt))
             }
           }
         }
@@ -130,14 +135,18 @@ object JoinlessQueries {
       StructField("partial_agg", DoubleType,  nullable = false)
     ))
 
-    val fs    = factDF.schema
+    val needed = Seq("lo_custkey", "lo_suppkey", "lo_partkey", "lo_orderdate", "amount")
+    val projected = factDF.select(needed.map(col): _*)
+
+    val fs = projected.schema
+    requireTypes(fs, needed.filterNot(_ == "amount"), "amount")
     val iCust = fs.fieldIndex("lo_custkey")
     val iSupp = fs.fieldIndex("lo_suppkey")
     val iPart = fs.fieldIndex("lo_partkey")
     val iDate = fs.fieldIndex("lo_orderdate")
     val iAmt  = fs.fieldIndex("amount")
 
-    val partials = factDF.rdd.mapPartitions { iter =>
+    val partials = projected.rdd.mapPartitions { iter =>
       val cn = custNation.value
       val dy = dateYear.value
       val pm = partMfgr.value
@@ -146,10 +155,10 @@ object JoinlessQueries {
 
       while (iter.hasNext) {
         val row = iter.next()
-        val ck = getKeyAsInt(row, iCust)
-        val sk = getKeyAsInt(row, iSupp)
-        val pk = getKeyAsInt(row, iPart)
-        val dk = getKeyAsInt(row, iDate)
+        val ck = row.getLong(iCust).toInt
+        val sk = row.getLong(iSupp).toInt
+        val pk = row.getLong(iPart).toInt
+        val dk = row.getLong(iDate).toInt
 
         if (ck >= 0 && ck < cn.length && sk >= 0 && sk < so.length &&
             pk >= 0 && pk < pm.length && dk >= 0 && dk < dy.length && so(sk)) {
@@ -158,9 +167,8 @@ object JoinlessQueries {
             val nation = cn(ck)
             val year   = dy(dk)
             if (nation >= 0 && year >= 0) {
-              require(nation < NATION_RADIX && mfgr < MFGR_RADIX, "group key exceeds packing radix")
               val key = (year.toLong * NATION_RADIX + nation.toLong) * MFGR_RADIX + mfgr.toLong
-              acc.update(key, acc.getOrElse(key, 0.0) + getDoubleAt(row, iAmt))
+              acc.update(key, acc.getOrElse(key, 0.0) + row.getDouble(iAmt))
             }
           }
         }
@@ -178,50 +186,112 @@ object JoinlessQueries {
 
   // ---------------------------------------------------------------------------
 
-  def run(spark: SparkSession, dataDir: String, query: String): DataFrame = {
+  /** @param repartitionFact if set, redistributes the fact table before the
+    *  scan. This adds a full exchange and is NOT part of the pattern; it exists
+    *  so that the effect of the fact-table partitioning can be measured
+    *  directly rather than assumed. */
+  /** Result of preparing and planning a query: the DataFrame, and the wall-clock
+    * cost of Phase 1 alone — collecting the dimensions to the driver, encoding
+    * them into the lookup structures, and broadcasting them.
+    *
+    * Phase 1 is a fixed cost: it depends on the size of the dimensions, not on
+    * the number of fact rows subsequently scanned. Reporting it separately is
+    * what allows the pattern's cost to be expressed as a constant plus a term
+    * proportional to the scan, rather than as a single number whose meaning
+    * changes with the workload. */
+  case class Prepared(df: DataFrame, setupSeconds: Double)
+
+  def run(spark: SparkSession, dataDir: String, query: String,
+          repartitionFact: Option[Int] = None): Prepared = {
     val cust = spark.read.parquet(s"$dataDir/customer")
     val supp = spark.read.parquet(s"$dataDir/supplier")
     val part = spark.read.parquet(s"$dataDir/part")
     val dat  = spark.read.parquet(s"$dataDir/date")
-    val lo   = spark.read.parquet(s"$dataDir/lineorder")   // no repartition: see README
+    val loRaw = spark.read.parquet(s"$dataDir/lineorder")
+    val lo = repartitionFact.fold(loRaw) { n =>
+      Console.err.println(s"[WARN] repartitioning the fact table to $n partitions " +
+        "adds a full exchange to the measured plan")
+      loRaw.repartition(n)
+    }
+    println(s"fact partitions = ${lo.rdd.getNumPartitions}")
 
-    val sc         = spark.sparkContext
-    val custNation = sc.broadcast(buildIntArray(cust, "c_custkey", "c_nation")._1)
-    val dateYear   = sc.broadcast(buildIntArray(dat,  "d_datekey", "d_year")._1)
+    val sc     = spark.sparkContext
+    val setup0 = System.nanoTime()
 
-    query.toLowerCase match {
+    val custNationA = buildIntArray(cust, "c_custkey", "c_nation")._1
+    val dateYearA   = buildIntArray(dat,  "d_datekey", "d_year")._1
+
+    // Validate the packing bounds once against the dimension arrays, before the
+    // scan. Checking inside the loop would verify, once per fact tuple, a
+    // property of a broadcast structure that cannot change during the scan.
+    require(custNationA.isEmpty || custNationA.max < NATION_RADIX,
+      s"c_nation code ${custNationA.max} exceeds packing radix $NATION_RADIX")
+
+    val custNation = sc.broadcast(custNationA)
+    val dateYear   = sc.broadcast(dateYearA)
+
+    // Phase 1 for the two dimensions every query needs. The per-query flag and
+    // dictionary arrays built below are also Phase 1 and are added to the total.
+    val setupBase = System.nanoTime() - setup0
+    var setupExtra = 0L
+    def timed[T](f: => T): T = {
+      val t = System.nanoTime(); val r = f; setupExtra += System.nanoTime() - t; r
+    }
+
+    val df = query.toLowerCase match {
       case "q1" =>
         runYearNation(lo, custNation, dateYear,
-          Some(sc.broadcast(buildFlagArray(supp, "s_suppkey"))),
-          Some(sc.broadcast(buildFlagArray(part, "p_partkey"))))
+          Some(timed(sc.broadcast(buildFlagArray(supp, "s_suppkey")))),
+          Some(timed(sc.broadcast(buildFlagArray(part, "p_partkey")))))
 
       case "q2" =>
-        runYearNation(lo, custNation, dateYear,
-          Some(sc.broadcast(buildFlagArray(supp, "s_suppkey", Some(col("s_region") === "AMERICA")))),
-          Some(sc.broadcast(buildFlagArray(part, "p_partkey"))))
-        // NOTE: the customer-side predicate (c_region = 'AMERICA') must also be
-        // folded in, by building custNation from the filtered customer table so
-        // that non-qualifying customers map to -1:
-        //   buildIntArray(cust.filter($"c_region" === "AMERICA"), "c_custkey", "c_nation")
+        // Both predicates are folded into the lookup structures. Customers
+        // outside the region are absent from the filtered table, so their slots
+        // stay at the -1 fill value and the fact row is discarded by the probe.
+        val custNationFiltered = timed(sc.broadcast(
+          buildIntArray(cust.filter(col("c_region") === "AMERICA"), "c_custkey", "c_nation")._1))
+        runYearNation(lo, custNationFiltered, dateYear,
+          Some(timed(sc.broadcast(buildFlagArray(supp, "s_suppkey", Some(col("s_region") === "AMERICA"))))),
+          Some(timed(sc.broadcast(buildFlagArray(part, "p_partkey")))))
 
       case "q3" =>
         val mfgrDict = part.filter(col("p_mfgr").isin("MFGR#1", "MFGR#2"))
+        val partMfgrA = timed(buildIntArray(mfgrDict, "p_partkey", "p_mfgr")._1)
+        require(partMfgrA.isEmpty || partMfgrA.max < MFGR_RADIX,
+          s"p_mfgr code ${partMfgrA.max} exceeds packing radix $MFGR_RADIX")
         runYearNationMfgr(lo, custNation, dateYear,
-          sc.broadcast(buildIntArray(mfgrDict, "p_partkey", "p_mfgr")._1),
-          sc.broadcast(buildFlagArray(supp, "s_suppkey")))
+          timed(sc.broadcast(partMfgrA)),
+          timed(sc.broadcast(buildFlagArray(supp, "s_suppkey"))))
 
       case "q4" =>
         runYearNation(lo, custNation, dateYear, None, None)
 
+      case "q5" =>
+        // Q1 restricted to one year, over a fact table partitioned by year.
+        // The predicate is on the partitioning key, so Spark prunes seven of
+        // the eight directories before any row is read. Every strategy reads
+        // the same pruned input; the question is whether the ratio between
+        // them changes or only their absolute times.
+        val loPart = spark.read.parquet(s"$dataDir/lineorder_by_year")
+          .filter(col("lo_year") === PRUNE_YEAR)
+        println(s"pruned partitions = ${loPart.rdd.getNumPartitions}")
+        runYearNation(loPart, custNation, dateYear,
+          Some(timed(sc.broadcast(buildFlagArray(supp, "s_suppkey")))),
+          Some(timed(sc.broadcast(buildFlagArray(part, "p_partkey")))))
+
       case other =>
-        throw new IllegalArgumentException(s"unknown query: $other (expected q1..q4)")
+        throw new IllegalArgumentException(s"unknown query: $other (expected q1..q5)")
     }
+
+    Prepared(df, (setupBase + setupExtra) / 1e9)
   }
 
   def main(args: Array[String]): Unit = {
     val dataDir = if (args.nonEmpty)   args(0) else "/path/to/ssb_synth"
     val query   = if (args.length > 1) args(1) else "q1"
     val cores   = if (args.length > 2) args(2) else "16"
+    // Optional 4th argument: repartition the fact table to N partitions.
+    val repart  = if (args.length > 3) Some(args(3).toInt) else None
 
     val spark = SparkSession.builder()
       .appName(s"JoinlessQueries-$query")
@@ -230,13 +300,18 @@ object JoinlessQueries {
       .config("spark.sql.autoBroadcastJoinThreshold", "-1")
       .getOrCreate()
 
-    val t0      = System.nanoTime()
-    val result  = run(spark, dataDir, query).cache()
-    val groups  = result.count()
-    val total   = result.agg(sum("total")).head().getDouble(0)
-    val elapsed = (System.nanoTime() - t0) / 1e9
+    val t0       = System.nanoTime()
+    val prepared = run(spark, dataDir, query, repart)
+    val result   = prepared.df.cache()
+    val groups   = result.count()
+    val total    = result.agg(sum("total")).head().getDouble(0)
+    val elapsed  = (System.nanoTime() - t0) / 1e9
+    val setup    = prepared.setupSeconds
 
     println(f"query         = $query")
+    println(f"repartition   = ${repart.map(_.toString).getOrElse("none")}")
+    println(f"setup         = $setup%.2f s")
+    println(f"scan          = ${elapsed - setup}%.2f s")
     println(f"groups        = $groups")
     println(f"total (check) = $total%.1f")
     println(f"elapsed       = $elapsed%.2f s")

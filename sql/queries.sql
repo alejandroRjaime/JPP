@@ -53,3 +53,18 @@ JOIN   customer c ON lo.lo_custkey   = c.c_custkey
 JOIN   date_dim d ON lo.lo_orderdate = d.d_datekey
 GROUP  BY d.d_year, c.c_nation
 ORDER  BY d.d_year, c.c_nation;
+
+-- Q5 ------------------------------------------------------------------------
+-- Q1 restricted to a single year, over a fact table partitioned by year.
+-- The predicate is on the partitioning key, so the scan prunes seven of the
+-- eight partitions. Every engine reads the same pruned input.
+SELECT d.d_year, c.c_nation, SUM(lo.amount) AS total
+FROM   lineorder_by_year lo
+JOIN   customer c ON lo.lo_custkey   = c.c_custkey
+JOIN   supplier s ON lo.lo_suppkey   = s.s_suppkey
+JOIN   part     p ON lo.lo_partkey   = p.p_partkey
+JOIN   date_dim d ON lo.lo_orderdate = d.d_datekey
+WHERE  lo.lo_year = 1997
+GROUP  BY d.d_year, c.c_nation
+ORDER  BY d.d_year, c.c_nation;
+-- Expected: 25 groups (one year x 25 nations).

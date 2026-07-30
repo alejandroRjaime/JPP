@@ -75,7 +75,20 @@ Full SQL in [`sql/queries.sql`](sql/queries.sql).
 sbt package
 ```
 
-### 2. Generate the dataset
+### 2. If `/tmp` is mounted `noexec`
+
+Snappy extracts its native library to a temp directory and maps it executable; on a
+hardened system that mapping fails and every Parquet read or write dies with
+`UnsatisfiedLinkError`. Check with `findmnt /tmp`. If `noexec` appears, either remount
+`/tmp` with `exec` or point Snappy elsewhere — the scripts here do the latter, and it can
+be overridden with `SNAPPY_TMP=/path spark-submit ...`:
+
+```
+--conf 'spark.driver.extraJavaOptions=-Dorg.xerial.snappy.tempdir=$HOME/tmp'
+--conf 'spark.executor.extraJavaOptions=-Dorg.xerial.snappy.tempdir=$HOME/tmp'
+```
+
+### 3. Generate the dataset
 
 ```bash
 spark-submit --class GenerateSSB --master 'local[16]' \
@@ -89,21 +102,21 @@ keys are dense, which is the precondition of the indexed-array lookup.
 The predicate attributes used by Q2 and Q3 — `c_region`, `s_region`, `p_mfgr` — live only
 on the dimensions, so the query set can be extended without regenerating the fact table.
 
-### 3. Run the Spark configurations
+### 4. Run the Spark configurations
 
 ```bash
 ./scripts/run_queryset.sh ~/ssb_synth     # all four queries
 ./scripts/run_all.sh ~/ssb_synth          # Q1 only
 ```
 
-### 4. Run the external engines
+### 5. Run the external engines
 
 ```bash
 duckdb < sql/duckdb.sql
 clickhouse-client --queries-file sql/clickhouse.sql
 ```
 
-### 5. Verify functional equivalence
+### 6. Verify functional equivalence
 
 For Q1, every configuration must produce **175 groups** and an aggregate sum of
 

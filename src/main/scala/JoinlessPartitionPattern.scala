@@ -62,14 +62,16 @@ object JoinlessPartitionPattern {
   }
 
   // Group key packing. NATION_RADIX bounds the cardinality of the inner
-  // attribute; if exceeded the packing is not injective and results are wrong,
-  // so it is checked rather than assumed.
+  // attribute; if exceeded the packing is not injective and results would be
+  // wrong. The bound is validated once against the dimension array before the
+  // scan begins, not per row: a check inside the loop would run once per fact
+  // tuple to verify a property of a broadcast structure that cannot change.
   private final val NATION_RADIX = 1000L
 
-  @inline private def packKey(year: Int, nation: Int): Long = {
-    require(nation >= 0 && nation < NATION_RADIX,
-      s"nation code $nation out of range for packed key (radix $NATION_RADIX)")
-    year.toLong * NATION_RADIX + nation.toLong
+  private def validateRadix(arr: Array[Int], name: String): Unit = {
+    val mx = if (arr.isEmpty) -1 else arr.max
+    require(mx < NATION_RADIX,
+      s"$name has code $mx, which exceeds the packing radix $NATION_RADIX")
   }
 
   // ---------------------------------------------------------------------------
@@ -167,14 +169,30 @@ object JoinlessPartitionPattern {
     // Column indices resolved on the driver from the schema, not per partition
     // from the first row: the original read `iter.buffered.head`, which skipped
     // empty partitions entirely and re-resolved indices on every partition.
-    val factSchema = factDF.schema
+    // Project before converting to RDD: `Dataset.rdd` materializes whatever the
+    // plan produces, so without this the scan reads every column of the fact
+    // table regardless of which ones the pass touches.
+    val projected = factDF.select(
+      Seq(custKeyCol, suppKeyCol, partKeyCol, dateKeyCol, measureCol).map(col): _*)
+
+    val factSchema = projected.schema
+    // The hot loop reads keys as Long and the measure as Double. Verify that
+    // once, here, so a schema mismatch fails with a clear message instead of a
+    // ClassCastException inside a task.
+    Seq(custKeyCol, suppKeyCol, partKeyCol, dateKeyCol).foreach { c =>
+      require(factSchema(c).dataType == LongType, s"$c must be LongType")
+    }
+    require(factSchema(measureCol).dataType == DoubleType, s"$measureCol must be DoubleType")
+
     val iCust = factSchema.fieldIndex(custKeyCol)
     val iSupp = factSchema.fieldIndex(suppKeyCol)
     val iPart = factSchema.fieldIndex(partKeyCol)
     val iDate = factSchema.fieldIndex(dateKeyCol)
     val iAmt  = factSchema.fieldIndex(measureCol)
 
-    val partialAggs = factDF.rdd.mapPartitions { iter =>
+    validateRadix(custNation.value, "c_nation")
+
+    val partialAggs = projected.rdd.mapPartitions { iter =>
       // Dereference the broadcast arrays once per partition.
       val cn = custNation.value
       val so = suppOk.value
@@ -183,15 +201,19 @@ object JoinlessPartitionPattern {
 
       val localAggs = new mutable.LongMap[Double]()
 
+      // Typed accessors, not the tolerant ones used to build the dimension
+      // arrays: this loop runs once per fact tuple, so a match on the boxed
+      // value would cost several dispatches per row over hundreds of millions
+      // of rows. Key and measure types are fixed by the schema check above.
       while (iter.hasNext) {
         val row = iter.next()
-        val ck = getKeyAsInt(row, iCust)
-        val sk = getKeyAsInt(row, iSupp)
-        val pk = getKeyAsInt(row, iPart)
-        val dk = getKeyAsInt(row, iDate)
+        val ck = row.getLong(iCust).toInt
+        val sk = row.getLong(iSupp).toInt
+        val pk = row.getLong(iPart).toInt
+        val dk = row.getLong(iDate).toInt
 
-        // Bounds-checked O(1) probes, lower bound included: an out-of-range or
-        // null key means no matching dimension row, so the fact row is dropped
+        // Bounds-checked O(1) probes, lower bound included: an out-of-range key
+        // means no matching dimension row, so the fact row is dropped
         // (inner-join semantics) instead of throwing.
         if (ck >= 0 && ck < cn.length &&
             sk >= 0 && sk < so.length &&
@@ -202,9 +224,9 @@ object JoinlessPartitionPattern {
           val nation = cn(ck)
           val year   = dy(dk)
           if (nation >= 0 && year >= 0) {
-            val key  = packKey(year, nation)
+            val key  = year.toLong * NATION_RADIX + nation.toLong
             val prev = localAggs.getOrElse(key, 0.0)
-            localAggs.update(key, prev + getDoubleAt(row, iAmt))
+            localAggs.update(key, prev + row.getDouble(iAmt))
           }
         }
       }
