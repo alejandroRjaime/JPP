@@ -30,6 +30,17 @@ CORES="${CORES:-16}"
 DRIVER_MEM="${DRIVER_MEM:-32g}"
 JAR="${JAR:-target/scala-2.12/jpp_2.12-1.0.jar}"
 
+# Spark 3.5 supports Java 8, 11 and 17. The interactive default on this host is
+# JDK 23, which spark-submit picks up silently from the environment; pinning it
+# here keeps the runtime a property of the launcher rather than of whichever
+# shell happened to invoke it. Override with JPP_JAVA_HOME.
+JPP_JAVA_HOME="${JPP_JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}"
+if [[ -x "$JPP_JAVA_HOME/bin/java" ]]; then
+  export JAVA_HOME="$JPP_JAVA_HOME"
+else
+  echo "[WARN] no JDK at $JPP_JAVA_HOME; falling back to JAVA_HOME=${JAVA_HOME:-<unset>}" >&2
+fi
+
 # MinIO endpoint and credentials. Override in the environment; do not commit
 # real credentials to this file.
 S3_ENDPOINT="${S3_ENDPOINT:-http://192.168.1.37:9010}"
@@ -60,6 +71,16 @@ ARGS=(
   --conf "spark.executor.extraJavaOptions=$JAVA_OPTS"
 )
 
+# Extra --conf entries as space-separated key=value pairs. The threshold sweep
+# needs to vary a setting that is otherwise fixed by this launcher; routing it
+# through here keeps every other part of the environment identical across the
+# points of the sweep, which is the only reason the points are comparable.
+if [[ -n "${JPP_EXTRA_CONF:-}" ]]; then
+  for kv in $JPP_EXTRA_CONF; do
+    ARGS+=(--conf "$kv")
+  done
+fi
+
 # S3A configuration is added only when a remote path is involved, so local runs
 # are not affected by it.
 if [[ "${1:-}" == s3a://* ]]; then
@@ -81,5 +102,9 @@ if [[ "${1:-}" == s3a://* ]]; then
     --conf spark.hadoop.fs.s3a.experimental.input.fadvise=sequential
   )
 fi
+
+# Recorded in the log so that the runtime is part of the measurement record and
+# not something inferred afterwards from the shell that happened to be used.
+echo "runtime       = $("${JAVA_HOME:-/usr}/bin/java" -version 2>&1 | head -1)"
 
 exec spark-submit "${ARGS[@]}" "$JAR" "$@"

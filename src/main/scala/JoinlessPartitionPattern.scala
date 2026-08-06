@@ -49,6 +49,19 @@ object JoinlessPartitionPattern {
         s"unsupported surrogate key type: ${other.getClass.getName}")
   }
 
+  /** The surrogate key without narrowing, so that a key beyond the Int range can
+    * be detected instead of silently wrapping to a negative value. */
+  private def getKeyAsLong(row: Row, i: Int): Long = row.get(i) match {
+    case v: java.lang.Long       => v.longValue()
+    case v: java.lang.Integer    => v.longValue()
+    case v: java.lang.Short      => v.longValue()
+    case v: java.math.BigDecimal => v.longValue()
+    case null                    => -1L
+    case other =>
+      throw new IllegalArgumentException(
+        s"unsupported surrogate key type: ${other.getClass.getName}")
+  }
+
   private def getDoubleAt(row: Row, i: Int): Double = row.get(i) match {
     case v: java.lang.Double     => v.doubleValue()
     case v: java.lang.Float      => v.floatValue().toDouble
@@ -98,8 +111,19 @@ object JoinlessPartitionPattern {
     val dictionary: Map[String, Int] =
       if (numeric) Map.empty else rawValues.distinct.sorted.zipWithIndex.toMap
 
-    val maxKey = rows.map(r => getKeyAsInt(r, 0)).max
-    require(maxKey >= 0, s"no valid surrogate keys in $keyCol")
+    // The key is read as a Long before it is narrowed. `getKeyAsInt` truncates,
+    // and a key above 2^31 truncates to a negative value that the `k >= 0` guard
+    // below then skips — so an out-of-range key would be dropped in silence and
+    // the array would come out sized by the largest key that happened to fit.
+    // The precondition the paper states is dense keys; this is the additional
+    // bound that dense-and-large keys run into, and it is checked rather than
+    // assumed.
+    val maxKeyLong = rows.map(r => getKeyAsLong(r, 0)).max
+    require(maxKeyLong >= 0, s"no valid surrogate keys in $keyCol")
+    require(maxKeyLong < Int.MaxValue,
+      s"largest surrogate key in $keyCol is $maxKeyLong, beyond the Int range an " +
+      s"indexed array can address (${Int.MaxValue}). The HashMap variant applies.")
+    val maxKey = maxKeyLong.toInt
 
     // -1 marks "no dimension row for this key", distinguishable from a real 0.
     val arr = Array.fill(maxKey + 1)(-1)
@@ -112,6 +136,114 @@ object JoinlessPartitionPattern {
     }
     (arr, dictionary)
   }
+
+  // ---------------------------------------------------------------------------
+  // Phase 1, streaming variant: same structure, built without a driver-side
+  // collect.
+  //
+  // `buildIntArray` above calls `collect()`, which materialises every dimension
+  // row as a boxed `Row` on the driver at once. That is what fails at a 1 GB
+  // dimension: 254.7M rows exceed `spark.driver.maxResultSize`, and raising the
+  // limit turns the failure into a driver OOM on a 32 GB heap. The array it was
+  // trying to produce is only about 1 GB and fits comfortably; the collect is
+  // the problem, not the structure.
+  //
+  // Here the array is allocated once and filled from `toLocalIterator`, which
+  // runs one job per partition and brings back one partition at a time. Peak
+  // driver memory becomes the array plus a single partition, rather than the
+  // array plus the whole dimension.
+  //
+  // Two quantities are needed before the scan and are obtained without a
+  // collect: the largest key, from an aggregate, and the value dictionary, from
+  // `distinct` — which returns one row per distinct attribute value (25 nations
+  // here), not one per dimension row.
+  // ---------------------------------------------------------------------------
+  def buildIntArrayStreaming(
+      df: DataFrame,
+      keyCol: String,
+      valCol: String
+  ): (Array[Int], Map[String, Int]) = {
+
+    val proj = df.select(col(keyCol).cast(LongType).alias("k"),
+                         col(valCol).cast(StringType).alias("v"))
+
+    val maxRow = proj.agg(max(col("k"))).head()
+    require(!maxRow.isNullAt(0), s"no valid surrogate keys in $keyCol")
+    val maxKey = maxRow.getLong(0)
+    require(maxKey >= 0, s"no valid surrogate keys in $keyCol")
+    require(maxKey < Int.MaxValue,
+      s"largest key $maxKey exceeds the addressable range of an indexed array; " +
+      s"the HashMap variant applies")
+
+    // Distinct attribute values only. This is a collect, but of the value
+    // domain, not of the dimension: it returns as many rows as there are
+    // distinct attribute values.
+    val distinctVals = proj.select(col("v")).distinct().collect()
+      .map(r => Option(r.getString(0)).getOrElse(""))
+    val numeric = distinctVals.forall(v => v.nonEmpty && v.forall(_.isDigit))
+    val dictionary: Map[String, Int] =
+      if (numeric) Map.empty else distinctVals.distinct.sorted.zipWithIndex.toMap
+
+    val arr = Array.fill(maxKey.toInt + 1)(-1)
+
+    val it = proj.toLocalIterator()
+    while (it.hasNext) {
+      val r = it.next()
+      if (!r.isNullAt(0)) {
+        val k = r.getLong(0)
+        if (k >= 0 && k <= maxKey) {
+          val raw = Option(r.getString(1)).getOrElse("")
+          arr(k.toInt) = if (numeric) raw.toInt else dictionary.getOrElse(raw, -1)
+        }
+      }
+    }
+    (arr, dictionary)
+  }
+
+  /** Streaming counterpart of `buildFlagArray`. */
+  def buildFlagArrayStreaming(
+      df: DataFrame,
+      keyCol: String,
+      predicate: Option[Column] = None
+  ): Array[Boolean] = {
+
+    val keys = df.select(col(keyCol).cast(LongType).alias("k"))
+    val maxRow = keys.agg(max(col("k"))).head()
+    require(!maxRow.isNullAt(0), s"no valid surrogate keys in $keyCol")
+    val maxKey = maxRow.getLong(0)
+    require(maxKey >= 0, s"no valid surrogate keys in $keyCol")
+    require(maxKey < Int.MaxValue,
+      s"largest key $maxKey exceeds the addressable range of an indexed array")
+
+    val arr = new Array[Boolean](maxKey.toInt + 1)
+    val accepted = predicate.fold(df)(p => df.filter(p))
+      .select(col(keyCol).cast(LongType).alias("k"))
+
+    val it = accepted.toLocalIterator()
+    while (it.hasNext) {
+      val r = it.next()
+      if (!r.isNullAt(0)) {
+        val k = r.getLong(0)
+        if (k >= 0 && k <= maxKey) arr(k.toInt) = true
+      }
+    }
+    arr
+  }
+
+  /** Which Phase 1 implementation to use, from JPP_PHASE1 (`collect` by default,
+    * `streaming` for the variant above). Selecting it by environment keeps the
+    * two paths comparable: the query code, the fact-table scan and the
+    * aggregation are byte-identical between the two, so a difference in the
+    * measurement is a difference in Phase 1 and nothing else. */
+  def phase1Mode: String = sys.env.getOrElse("JPP_PHASE1", "collect")
+
+  def buildIntArrayAuto(df: DataFrame, keyCol: String, valCol: String): (Array[Int], Map[String, Int]) =
+    if (phase1Mode == "streaming") buildIntArrayStreaming(df, keyCol, valCol)
+    else buildIntArray(df, keyCol, valCol)
+
+  def buildFlagArrayAuto(df: DataFrame, keyCol: String, predicate: Option[Column] = None): Array[Boolean] =
+    if (phase1Mode == "streaming") buildFlagArrayStreaming(df, keyCol, predicate)
+    else buildFlagArray(df, keyCol, predicate)
 
   // Flags for filter-only dimensions.
   //   predicate = None  -> presence only (every key in the dimension accepted)
@@ -126,8 +258,13 @@ object JoinlessPartitionPattern {
 
     val all = df.select(col(keyCol)).collect()
     require(all.nonEmpty, s"dimension is empty: $keyCol")
-    val maxKey = all.map(r => getKeyAsInt(r, 0)).max
-    require(maxKey >= 0, s"no valid surrogate keys in $keyCol")
+    // Same narrowing hazard as in buildIntArray: checked before truncation.
+    val maxKeyLong = all.map(r => getKeyAsLong(r, 0)).max
+    require(maxKeyLong >= 0, s"no valid surrogate keys in $keyCol")
+    require(maxKeyLong < Int.MaxValue,
+      s"largest surrogate key in $keyCol is $maxKeyLong, beyond the Int range an " +
+      s"indexed array can address (${Int.MaxValue}). The HashMap variant applies.")
+    val maxKey = maxKeyLong.toInt
 
     val accepted = predicate.fold(df)(p => df.filter(p)).select(col(keyCol)).collect()
     val arr = new Array[Boolean](maxKey + 1)

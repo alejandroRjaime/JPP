@@ -16,13 +16,42 @@ import org.apache.spark.sql.functions._
 object SparkBaselineQueries {
 
   def run(spark: SparkSession, dataDir: String, query: String, strategy: String): DataFrame = {
-    // Implicit broadcasting is disabled in both cases: SMJ must not be silently
-    // converted into a broadcast plan, and BHJ is forced by explicit hint.
-    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
-    val bcast = strategy.toLowerCase == "bhj"
+    // Three strategies, differing only in how the join is allowed to be planned:
+    //
+    //   smj   threshold pinned to -1, no hints. Broadcasting is disabled outright
+    //         so that the Sort-Merge Join baseline cannot be silently converted
+    //         into a broadcast plan.
+    //   bhj   threshold pinned to -1, every dimension force-broadcast by hint.
+    //         The hint is what selects the plan; the threshold is neutralised so
+    //         that it cannot also contribute.
+    //   auto  threshold left exactly as the session received it, no hints. This
+    //         is the configuration a reviewer asks about: the optimizer decides,
+    //         and the decision is a function of the threshold being swept.
+    //
+    // `auto` must not call `conf.set` at all — overwriting the value here would
+    // silently discard the sweep's --conf and make every point of the sweep the
+    // same measurement.
+    val strat = strategy.toLowerCase
+    require(Set("smj", "bhj", "auto").contains(strat), s"unknown strategy: $strategy")
+    if (strat != "auto") spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    val bcast = strat == "bhj"
     def d(df: DataFrame): DataFrame = if (bcast) broadcast(df) else df
 
     val lo = spark.read.parquet(s"$dataDir/lineorder")
+
+    // Same guard as the pattern side. Q5 reads a different fact table and is
+    // checked inside its own branch; the dimensions are checked here, before the
+    // projections, because the projection does not change the partitioning and
+    // checking once keeps the guard out of five near-identical branches.
+    if (query.toLowerCase != "q5") {
+      PartitionGuard.check(
+        Seq("lineorder" -> lo,
+            "customer"  -> spark.read.parquet(s"$dataDir/customer"),
+            "supplier"  -> spark.read.parquet(s"$dataDir/supplier"),
+            "part"      -> spark.read.parquet(s"$dataDir/part"),
+            "date"      -> spark.read.parquet(s"$dataDir/date")),
+        s"SparkBaselineQueries/$query/$strat")
+    }
 
     query.toLowerCase match {
       case "q1" =>
@@ -101,6 +130,9 @@ object SparkBaselineQueries {
       .config("spark.sql.adaptive.enabled", "false")
       .getOrCreate()
 
+    // Installed before any action so that no execution escapes the record.
+    RunReport.install(spark, sys.env.getOrElse("JPP_RUN_LABEL", s"$query-$strategy"))
+
     val t0      = System.nanoTime()
     val result  = run(spark, dataDir, query, strategy).cache()
     val groups  = result.count()
@@ -109,10 +141,15 @@ object SparkBaselineQueries {
 
     println(f"query         = $query")
     println(f"strategy      = $strategy")
+    // The value in force during the run, read back rather than assumed: for
+    // `auto` it comes from the sweep's --conf, and reporting the intended value
+    // instead of the effective one is exactly the gap the reviewer identified.
+    println(f"threshold     = ${spark.conf.get("spark.sql.autoBroadcastJoinThreshold")}")
     println(f"groups        = $groups")
     println(f"total (check) = $total%.1f")
     println(f"elapsed       = $elapsed%.2f s")
 
+    RunReport.emit(spark)
     spark.stop()
   }
 }

@@ -1,0 +1,58 @@
+==============================================================================
+run: unpivot-par-r3
+==============================================================================
+
+--- effective configuration ---
+spark.sql.autoBroadcastJoinThreshold       = 10485760b
+spark.sql.adaptive.enabled                 = false
+spark.sql.shuffle.partitions               = 200
+spark.driver.memory                        = 32g
+spark.executor.memory                      = <unset>
+spark.driver.maxResultSize                 = <unset>
+spark.master                               = local[16]
+spark.default.parallelism                  = 16
+spark.local.dir                            = /home/athenas/spark-tmp
+jvm.availableProcessors                    = 32
+jvm.maxMemoryMB                            = 32768
+java.version                               = 17.0.19
+java.vendor                                = Ubuntu
+spark.version                              = 3.5.8
+
+--- operator counts (principal execution) ---
+trigger                                   = collect
+BroadcastHashJoin                         = 0
+SortMergeJoin                             = 0
+ShuffleExchange                           = 3
+BroadcastExchange                         = 0
+Exchange (shuffle + broadcast)            = 3
+
+--- broadcast cost, as measured by Spark ---
+collectTime ms                            = 0
+buildTime ms                              = 0
+broadcastTime ms                          = 0
+total broadcast ms                        = 0
+broadcast rows                            = 0
+broadcast dataSize bytes                  = 0
+
+--- executed plan ---
+*(4) Sort [SCENARIO#35 ASC NULLS FIRST], true, 0
++- Exchange rangepartitioning(SCENARIO#35 ASC NULLS FIRST, 200), ENSURE_REQUIREMENTS, [plan_id=64]
+   +- *(3) HashAggregate(keys=[SCENARIO#35], functions=[first(count(1)#155L, true), first(sum(COUNTERPARTY_EXPOSURE)#157, true), count(VALUATION_METHOD#152), count(PROTECTION_METHOD#153)], output=[SCENARIO#35, n#79L, exposure#81, valuations#82L, protections#83L])
+      +- Exchange hashpartitioning(SCENARIO#35, 200), ENSURE_REQUIREMENTS, [plan_id=60]
+         +- *(2) HashAggregate(keys=[SCENARIO#35], functions=[partial_first(count(1)#155L, true) FILTER (WHERE (gid#151 = 0)), partial_first(sum(COUNTERPARTY_EXPOSURE)#157, true) FILTER (WHERE (gid#151 = 0)), partial_count(VALUATION_METHOD#152) FILTER (WHERE (gid#151 = 1)), partial_count(PROTECTION_METHOD#153) FILTER (WHERE (gid#151 = 2))], output=[SCENARIO#35, first#195L, valueSet#196, first#197, valueSet#198, count#199L, count#200L])
+            +- *(2) HashAggregate(keys=[SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151], functions=[count(1), sum(COUNTERPARTY_EXPOSURE#154)], output=[SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151, count(1)#155L, sum(COUNTERPARTY_EXPOSURE)#157])
+               +- Exchange hashpartitioning(SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151, 200), ENSURE_REQUIREMENTS, [plan_id=55]
+                  +- *(1) HashAggregate(keys=[SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151], functions=[partial_count(1), partial_sum(COUNTERPARTY_EXPOSURE#154)], output=[SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151, count#203L, sum#204])
+                     +- *(1) Expand [[SCENARIO#35, null, null, 0, COUNTERPARTY_EXPOSURE#34], [SCENARIO#35, VALUATION_METHOD#32, null, 1, null], [SCENARIO#35, null, PROTECTION_METHOD#33, 2, null]], [SCENARIO#35, VALUATION_METHOD#152, PROTECTION_METHOD#153, gid#151, COUNTERPARTY_EXPOSURE#154]
+                        +- InMemoryTableScan [VALUATION_METHOD#32, PROTECTION_METHOD#33, COUNTERPARTY_EXPOSURE#34, SCENARIO#35]
+                              +- InMemoryRelation [ENTITY_ID#30, INSTRUMENT_ID#31, VALUATION_METHOD#32, PROTECTION_METHOD#33, COUNTERPARTY_EXPOSURE#34, SCENARIO#35], StorageLevel(disk, memory, deserialized, 1 replicas)
+                                    +- *(1) Scan ExistingRDD[ENTITY_ID#30,INSTRUMENT_ID#31,VALUATION_METHOD#32,PROTECTION_METHOD#33,COUNTERPARTY_EXPOSURE#34,SCENARIO#35]
+
+
+--- cached plan behind InMemoryTableScan ---
+*(1) Scan ExistingRDD[ENTITY_ID#30,INSTRUMENT_ID#31,VALUATION_METHOD#32,PROTECTION_METHOD#33,COUNTERPARTY_EXPOSURE#34,SCENARIO#35]
+
+
+--- all 2 executions in this run ---
+[0] collect                      bhj=0 smj=0 shuffle=3 bcastEx=0 bcastMs=0
+[1] count                        bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0

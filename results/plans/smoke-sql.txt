@@ -1,0 +1,64 @@
+==============================================================================
+run: smoke-sql
+==============================================================================
+
+--- effective configuration ---
+spark.sql.autoBroadcastJoinThreshold       = 10485760b
+spark.sql.adaptive.enabled                 = false
+spark.sql.shuffle.partitions               = 200
+spark.driver.memory                        = 32g
+spark.executor.memory                      = <unset>
+spark.driver.maxResultSize                 = <unset>
+spark.master                               = local[16]
+spark.default.parallelism                  = 16
+spark.local.dir                            = /home/athenas/spark-tmp
+jvm.availableProcessors                    = 32
+jvm.maxMemoryMB                            = 32768
+java.version                               = 17.0.19
+java.vendor                                = Ubuntu
+spark.version                              = 3.5.8
+
+--- operator counts (principal execution) ---
+trigger                                   = collect
+BroadcastHashJoin                         = 0
+SortMergeJoin                             = 0
+ShuffleExchange                           = 3
+BroadcastExchange                         = 0
+Exchange (shuffle + broadcast)            = 3
+
+--- broadcast cost, as measured by Spark ---
+collectTime ms                            = 0
+buildTime ms                              = 0
+broadcastTime ms                          = 0
+total broadcast ms                        = 0
+broadcast rows                            = 0
+broadcast dataSize bytes                  = 0
+
+--- executed plan ---
+*(4) Sort [SCENARIO#44 ASC NULLS FIRST], true, 0
++- Exchange rangepartitioning(SCENARIO#44 ASC NULLS FIRST, 200), ENSURE_REQUIREMENTS, [plan_id=79]
+   +- *(3) HashAggregate(keys=[SCENARIO#44], functions=[first(count(1)#164L, true), first(sum(COUNTERPARTY_EXPOSURE)#166, true), count(VALUATION_METHOD#161), count(PROTECTION_METHOD#162)], output=[SCENARIO#44, n#88L, exposure#90, valuations#91L, protections#92L])
+      +- Exchange hashpartitioning(SCENARIO#44, 200), ENSURE_REQUIREMENTS, [plan_id=75]
+         +- *(2) HashAggregate(keys=[SCENARIO#44], functions=[partial_first(count(1)#164L, true) FILTER (WHERE (gid#160 = 0)), partial_first(sum(COUNTERPARTY_EXPOSURE)#166, true) FILTER (WHERE (gid#160 = 0)), partial_count(VALUATION_METHOD#161) FILTER (WHERE (gid#160 = 1)), partial_count(PROTECTION_METHOD#162) FILTER (WHERE (gid#160 = 2))], output=[SCENARIO#44, first#204L, valueSet#205, first#206, valueSet#207, count#208L, count#209L])
+            +- *(2) HashAggregate(keys=[SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160], functions=[count(1), sum(COUNTERPARTY_EXPOSURE#163)], output=[SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160, count(1)#164L, sum(COUNTERPARTY_EXPOSURE)#166])
+               +- Exchange hashpartitioning(SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160, 200), ENSURE_REQUIREMENTS, [plan_id=70]
+                  +- *(1) HashAggregate(keys=[SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160], functions=[partial_count(1), partial_sum(COUNTERPARTY_EXPOSURE#163)], output=[SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160, count#212L, sum#213])
+                     +- *(1) Expand [[SCENARIO#44, null, null, 0, COUNTERPARTY_EXPOSURE#43], [SCENARIO#44, VALUATION_METHOD#41, null, 1, null], [SCENARIO#44, null, PROTECTION_METHOD#42, 2, null]], [SCENARIO#44, VALUATION_METHOD#161, PROTECTION_METHOD#162, gid#160, COUNTERPARTY_EXPOSURE#163]
+                        +- InMemoryTableScan [VALUATION_METHOD#41, PROTECTION_METHOD#42, COUNTERPARTY_EXPOSURE#43, SCENARIO#44]
+                              +- InMemoryRelation [ENTITY_ID#0, INSTRUMENT_ID#1, VALUATION_METHOD#41, PROTECTION_METHOD#42, COUNTERPARTY_EXPOSURE#43, SCENARIO#44], StorageLevel(disk, memory, deserialized, 1 replicas)
+                                    +- *(1) Project [ENTITY_ID#0, INSTRUMENT_ID#1, s#37.VALUATION_METHOD AS VALUATION_METHOD#41, s#37.PROTECTION_METHOD AS PROTECTION_METHOD#42, s#37.COUNTERPARTY_EXPOSURE AS COUNTERPARTY_EXPOSURE#43, s#37.SCENARIO AS SCENARIO#44]
+                                       +- *(1) Generate explode(array(struct(VALUATION_METHOD, VALUATION_METHOD_SC_1#2, PROTECTION_METHOD, PROTECTION_METHOD_SC_1#3, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC1#4, SCENARIO, 1), struct(VALUATION_METHOD, VALUATION_METHOD_SC_2#5, PROTECTION_METHOD, PROTECTION_METHOD_SC_2#6, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC2#7, SCENARIO, 2), struct(VALUATION_METHOD, VALUATION_METHOD_SC_3#8, PROTECTION_METHOD, PROTECTION_METHOD_SC_3#9, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC3#10, SCENARIO, 3))), [ENTITY_ID#0, INSTRUMENT_ID#1], false, [s#37]
+                                          +- *(1) ColumnarToRow
+                                             +- FileScan parquet [ENTITY_ID#0,INSTRUMENT_ID#1,VALUATION_METHOD_SC_1#2,PROTECTION_METHOD_SC_1#3,COUNTERPARTY_EXPOSURE_SC1#4,VALUATION_METHOD_SC_2#5,PROTECTION_METHOD_SC_2#6,COUNTERPARTY_EXPOSURE_SC2#7,VALUATION_METHOD_SC_3#8,PROTECTION_METHOD_SC_3#9,COUNTERPARTY_EXPOSURE_SC3#10] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_scenarios/scenarios], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<ENTITY_ID:string,INSTRUMENT_ID:string,VALUATION_METHOD_SC_1:string,PROTECTION_METHOD_SC_1:...
+
+
+--- cached plan behind InMemoryTableScan ---
+*(1) Project [ENTITY_ID#0, INSTRUMENT_ID#1, s#37.VALUATION_METHOD AS VALUATION_METHOD#41, s#37.PROTECTION_METHOD AS PROTECTION_METHOD#42, s#37.COUNTERPARTY_EXPOSURE AS COUNTERPARTY_EXPOSURE#43, s#37.SCENARIO AS SCENARIO#44]
++- *(1) Generate explode(array(struct(VALUATION_METHOD, VALUATION_METHOD_SC_1#2, PROTECTION_METHOD, PROTECTION_METHOD_SC_1#3, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC1#4, SCENARIO, 1), struct(VALUATION_METHOD, VALUATION_METHOD_SC_2#5, PROTECTION_METHOD, PROTECTION_METHOD_SC_2#6, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC2#7, SCENARIO, 2), struct(VALUATION_METHOD, VALUATION_METHOD_SC_3#8, PROTECTION_METHOD, PROTECTION_METHOD_SC_3#9, COUNTERPARTY_EXPOSURE, COUNTERPARTY_EXPOSURE_SC3#10, SCENARIO, 3))), [ENTITY_ID#0, INSTRUMENT_ID#1], false, [s#37]
+   +- *(1) ColumnarToRow
+      +- FileScan parquet [ENTITY_ID#0,INSTRUMENT_ID#1,VALUATION_METHOD_SC_1#2,PROTECTION_METHOD_SC_1#3,COUNTERPARTY_EXPOSURE_SC1#4,VALUATION_METHOD_SC_2#5,PROTECTION_METHOD_SC_2#6,COUNTERPARTY_EXPOSURE_SC2#7,VALUATION_METHOD_SC_3#8,PROTECTION_METHOD_SC_3#9,COUNTERPARTY_EXPOSURE_SC3#10] Batched: true, DataFilters: [], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_scenarios/scenarios], PartitionFilters: [], PushedFilters: [], ReadSchema: struct<ENTITY_ID:string,INSTRUMENT_ID:string,VALUATION_METHOD_SC_1:string,PROTECTION_METHOD_SC_1:...
+
+
+--- all 2 executions in this run ---
+[0] collect                      bhj=0 smj=0 shuffle=3 bcastEx=0 bcastMs=0
+[1] count                        bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0

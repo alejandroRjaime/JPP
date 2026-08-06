@@ -1,0 +1,86 @@
+==============================================================================
+run: q4-auto-admits-4:date+supplier+part+customer-r1
+==============================================================================
+
+--- effective configuration ---
+spark.sql.autoBroadcastJoinThreshold       = 7876670
+spark.sql.adaptive.enabled                 = false
+spark.sql.shuffle.partitions               = 200
+spark.driver.memory                        = 32g
+spark.executor.memory                      = <unset>
+spark.driver.maxResultSize                 = <unset>
+spark.master                               = local[16]
+spark.default.parallelism                  = 16
+spark.local.dir                            = /home/athenas/spark-tmp
+jvm.availableProcessors                    = 32
+jvm.maxMemoryMB                            = 32768
+java.version                               = 17.0.19
+java.vendor                                = Ubuntu
+spark.version                              = 3.5.8
+
+--- operator counts (principal execution) ---
+trigger                                   = count
+BroadcastHashJoin                         = 2
+SortMergeJoin                             = 0
+ShuffleExchange                           = 2
+BroadcastExchange                         = 2
+Exchange (shuffle + broadcast)            = 4
+
+--- broadcast cost, as measured by Spark ---
+collectTime ms                            = 1241
+buildTime ms                              = 829
+broadcastTime ms                          = 143
+total broadcast ms                        = 2213
+broadcast rows                            = 3002556
+broadcast dataSize bytes                  = 159286752
+
+--- executed plan ---
+*(2) HashAggregate(keys=[], functions=[count(1)], output=[count#102L])
++- Exchange SinglePartition, ENSURE_REQUIREMENTS, [plan_id=152]
+   +- *(1) HashAggregate(keys=[], functions=[partial_count(1)], output=[count#150L])
+      +- InMemoryTableScan
+            +- InMemoryRelation [d_year#22, c_nation#13, total#76], StorageLevel(disk, memory, deserialized, 1 replicas)
+                  +- *(4) HashAggregate(keys=[d_year#22, c_nation#13], functions=[sum(amount#5)], output=[d_year#22, c_nation#13, total#76])
+                     +- Exchange hashpartitioning(d_year#22, c_nation#13, 200), ENSURE_REQUIREMENTS, [plan_id=99]
+                        +- *(3) HashAggregate(keys=[d_year#22, c_nation#13], functions=[partial_sum(amount#5)], output=[d_year#22, c_nation#13, sum#81])
+                           +- *(3) Project [amount#5, c_nation#13, d_year#22]
+                              +- *(3) BroadcastHashJoin [lo_orderdate#4L], [d_datekey#21L], Inner, BuildRight, false
+                                 :- *(3) Project [lo_orderdate#4L, amount#5, c_nation#13]
+                                 :  +- *(3) BroadcastHashJoin [lo_custkey#1L], [c_custkey#12L], Inner, BuildRight, false
+                                 :     :- *(3) Filter (isnotnull(lo_custkey#1L) AND isnotnull(lo_orderdate#4L))
+                                 :     :  +- *(3) ColumnarToRow
+                                 :     :     +- FileScan parquet [lo_custkey#1L,lo_orderdate#4L,amount#5] Batched: true, DataFilters: [isnotnull(lo_custkey#1L), isnotnull(lo_orderdate#4L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/lineorder], PartitionFilters: [], PushedFilters: [IsNotNull(lo_custkey), IsNotNull(lo_orderdate)], ReadSchema: struct<lo_custkey:bigint,lo_orderdate:bigint,amount:double>
+                                 :     +- BroadcastExchange HashedRelationBroadcastMode(List(input[0, bigint, false]),false), [plan_id=85]
+                                 :        +- *(1) Filter isnotnull(c_custkey#12L)
+                                 :           +- *(1) ColumnarToRow
+                                 :              +- FileScan parquet [c_custkey#12L,c_nation#13] Batched: true, DataFilters: [isnotnull(c_custkey#12L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/customer], PartitionFilters: [], PushedFilters: [IsNotNull(c_custkey)], ReadSchema: struct<c_custkey:bigint,c_nation:string>
+                                 +- BroadcastExchange HashedRelationBroadcastMode(List(input[0, bigint, false]),false), [plan_id=93]
+                                    +- *(2) Filter isnotnull(d_datekey#21L)
+                                       +- *(2) ColumnarToRow
+                                          +- FileScan parquet [d_datekey#21L,d_year#22] Batched: true, DataFilters: [isnotnull(d_datekey#21L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/date], PartitionFilters: [], PushedFilters: [IsNotNull(d_datekey)], ReadSchema: struct<d_datekey:bigint,d_year:string>
+
+
+--- cached plan behind InMemoryTableScan ---
+*(4) HashAggregate(keys=[d_year#22, c_nation#13], functions=[sum(amount#5)], output=[d_year#22, c_nation#13, total#76])
++- Exchange hashpartitioning(d_year#22, c_nation#13, 200), ENSURE_REQUIREMENTS, [plan_id=99]
+   +- *(3) HashAggregate(keys=[d_year#22, c_nation#13], functions=[partial_sum(amount#5)], output=[d_year#22, c_nation#13, sum#81])
+      +- *(3) Project [amount#5, c_nation#13, d_year#22]
+         +- *(3) BroadcastHashJoin [lo_orderdate#4L], [d_datekey#21L], Inner, BuildRight, false
+            :- *(3) Project [lo_orderdate#4L, amount#5, c_nation#13]
+            :  +- *(3) BroadcastHashJoin [lo_custkey#1L], [c_custkey#12L], Inner, BuildRight, false
+            :     :- *(3) Filter (isnotnull(lo_custkey#1L) AND isnotnull(lo_orderdate#4L))
+            :     :  +- *(3) ColumnarToRow
+            :     :     +- FileScan parquet [lo_custkey#1L,lo_orderdate#4L,amount#5] Batched: true, DataFilters: [isnotnull(lo_custkey#1L), isnotnull(lo_orderdate#4L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/lineorder], PartitionFilters: [], PushedFilters: [IsNotNull(lo_custkey), IsNotNull(lo_orderdate)], ReadSchema: struct<lo_custkey:bigint,lo_orderdate:bigint,amount:double>
+            :     +- BroadcastExchange HashedRelationBroadcastMode(List(input[0, bigint, false]),false), [plan_id=85]
+            :        +- *(1) Filter isnotnull(c_custkey#12L)
+            :           +- *(1) ColumnarToRow
+            :              +- FileScan parquet [c_custkey#12L,c_nation#13] Batched: true, DataFilters: [isnotnull(c_custkey#12L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/customer], PartitionFilters: [], PushedFilters: [IsNotNull(c_custkey)], ReadSchema: struct<c_custkey:bigint,c_nation:string>
+            +- BroadcastExchange HashedRelationBroadcastMode(List(input[0, bigint, false]),false), [plan_id=93]
+               +- *(2) Filter isnotnull(d_datekey#21L)
+                  +- *(2) ColumnarToRow
+                     +- FileScan parquet [d_datekey#21L,d_year#22] Batched: true, DataFilters: [isnotnull(d_datekey#21L)], Format: Parquet, Location: InMemoryFileIndex(1 paths)[file:/home/athenas/ssb_synth/date], PartitionFilters: [], PushedFilters: [IsNotNull(d_datekey)], ReadSchema: struct<d_datekey:bigint,d_year:string>
+
+
+--- all 2 executions in this run ---
+[0] count                        bhj=2 smj=0 shuffle=2 bcastEx=2 bcastMs=2213
+[1] head                         bhj=2 smj=0 shuffle=2 bcastEx=2 bcastMs=2213

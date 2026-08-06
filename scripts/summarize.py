@@ -13,16 +13,18 @@ from collections import defaultdict
 path = sys.argv[1] if len(sys.argv) > 1 else "queryset.log"
 num  = lambda s: float(s.replace(".", "").replace(",", ".")) if "," in s else float(s)
 
-runs, cur = [], {}
+# A record is flushed on `elapsed`, which every runner prints as the last line of
+# its block. Keying on `query` instead would silently drop any runner that does
+# not print one — JoinlessBase prints `variant` — folding its fields into the
+# preceding record and corrupting that baseline as well as losing its own.
+runs, cur, unlabelled = [], {}, 0
 for line in open(path, encoding="utf-8", errors="ignore"):
     m = re.match(r"^\s*(query|strategy|variant|groups|total \(check\)|elapsed)\s*=\s*(.+?)\s*$", line)
     if not m:
         continue
     k, v = m.group(1), m.group(2)
     if k == "query":
-        if cur.get("query"):
-            runs.append(cur)
-        cur = {"query": v, "strategy": "joinless"}
+        cur["query"] = v
     elif k in ("strategy", "variant"):
         cur["strategy"] = v
     elif k == "groups":
@@ -31,8 +33,16 @@ for line in open(path, encoding="utf-8", errors="ignore"):
         cur["total"] = num(v)
     elif k == "elapsed":
         cur["elapsed"] = num(v.replace(" s", ""))
-if cur.get("query"):
-    runs.append(cur)
+        if "query" not in cur:
+            unlabelled += 1
+        cur.setdefault("query", "UNLABELLED")
+        cur.setdefault("strategy", "joinless")
+        runs.append(cur)
+        cur = {}
+
+if unlabelled:
+    print(f"WARNING: {unlabelled} run(s) printed no 'query =' line and are grouped "
+          f"under UNLABELLED. Fix the runner rather than guessing which query it was.\n")
 
 by = defaultdict(list)
 for r in runs:

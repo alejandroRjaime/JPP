@@ -1,0 +1,71 @@
+==============================================================================
+run: dim1000mb-streaming-q2-r3
+==============================================================================
+
+--- effective configuration ---
+spark.sql.autoBroadcastJoinThreshold       = -1
+spark.sql.adaptive.enabled                 = false
+spark.sql.shuffle.partitions               = 200
+spark.driver.memory                        = 32g
+spark.executor.memory                      = <unset>
+spark.driver.maxResultSize                 = <unset>
+spark.master                               = local[16]
+spark.default.parallelism                  = 16
+spark.local.dir                            = /home/athenas/spark-tmp
+jvm.availableProcessors                    = 32
+jvm.maxMemoryMB                            = 32768
+java.version                               = 17.0.19
+java.vendor                                = Ubuntu
+spark.version                              = 3.5.8
+
+--- operator counts (principal execution) ---
+trigger                                   = count
+BroadcastHashJoin                         = 0
+SortMergeJoin                             = 0
+ShuffleExchange                           = 2
+BroadcastExchange                         = 0
+Exchange (shuffle + broadcast)            = 2
+
+--- broadcast cost, as measured by Spark ---
+collectTime ms                            = 0
+buildTime ms                              = 0
+broadcastTime ms                          = 0
+total broadcast ms                        = 0
+broadcast rows                            = 0
+broadcast dataSize bytes                  = 0
+
+--- executed plan ---
+*(2) HashAggregate(keys=[], functions=[count(1)], output=[count#175L])
++- Exchange SinglePartition, ENSURE_REQUIREMENTS, [plan_id=494]
+   +- *(1) HashAggregate(keys=[], functions=[partial_count(1)], output=[count#223L])
+      +- InMemoryTableScan
+            +- InMemoryRelation [d_year#139, c_nation#140, total#149], StorageLevel(disk, memory, deserialized, 1 replicas)
+                  +- *(2) HashAggregate(keys=[d_year#139, c_nation#140], functions=[sum(partial_agg#141)], output=[d_year#139, c_nation#140, total#149])
+                     +- Exchange hashpartitioning(d_year#139, c_nation#140, 200), ENSURE_REQUIREMENTS, [plan_id=469]
+                        +- *(1) HashAggregate(keys=[d_year#139, c_nation#140], functions=[partial_sum(partial_agg#141)], output=[d_year#139, c_nation#140, sum#154])
+                           +- *(1) Scan ExistingRDD[d_year#139,c_nation#140,partial_agg#141]
+
+
+--- cached plan behind InMemoryTableScan ---
+*(2) HashAggregate(keys=[d_year#139, c_nation#140], functions=[sum(partial_agg#141)], output=[d_year#139, c_nation#140, total#149])
++- Exchange hashpartitioning(d_year#139, c_nation#140, 200), ENSURE_REQUIREMENTS, [plan_id=469]
+   +- *(1) HashAggregate(keys=[d_year#139, c_nation#140], functions=[partial_sum(partial_agg#141)], output=[d_year#139, c_nation#140, sum#154])
+      +- *(1) Scan ExistingRDD[d_year#139,c_nation#140,partial_agg#141]
+
+
+--- all 15 executions in this run ---
+[0] head                         bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[1] collect                      bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[2] toLocalIterator              bhj=0 smj=0 shuffle=0 bcastEx=0 bcastMs=0
+[3] head                         bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[4] collect                      bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[5] toLocalIterator              bhj=0 smj=0 shuffle=0 bcastEx=0 bcastMs=0
+[6] head                         bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[7] collect                      bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[8] toLocalIterator              bhj=0 smj=0 shuffle=0 bcastEx=0 bcastMs=0
+[9] head                         bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[10] toLocalIterator              bhj=0 smj=0 shuffle=0 bcastEx=0 bcastMs=0
+[11] head                         bhj=0 smj=0 shuffle=1 bcastEx=0 bcastMs=0
+[12] toLocalIterator              bhj=0 smj=0 shuffle=0 bcastEx=0 bcastMs=0
+[13] count                        bhj=0 smj=0 shuffle=2 bcastEx=0 bcastMs=0
+[14] head                         bhj=0 smj=0 shuffle=2 bcastEx=0 bcastMs=0
