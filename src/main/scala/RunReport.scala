@@ -151,6 +151,22 @@ object RunReport {
               dir: String = sys.env.getOrElse("JPP_PLAN_DIR", "results/plans")): Unit = {
     label = runLabel
     outDir = dir
+    // Task-level metrics, for the shuffle volume. A QueryExecutionListener sees
+    // plans and SQL metrics; shuffle bytes written and read per task come from
+    // the scheduler's listener bus instead.
+    spark.sparkContext.addSparkListener(new org.apache.spark.scheduler.SparkListener {
+      override def onTaskEnd(e: org.apache.spark.scheduler.SparkListenerTaskEnd): Unit = {
+        val m = e.taskMetrics
+        if (m != null) {
+          shWritten    += m.shuffleWriteMetrics.bytesWritten
+          shRecWritten += m.shuffleWriteMetrics.recordsWritten
+          shLocalRead  += m.shuffleReadMetrics.localBytesRead
+          shRemoteRead += m.shuffleReadMetrics.remoteBytesRead
+          shRecRead    += m.shuffleReadMetrics.recordsRead
+        }
+      }
+    })
+
     spark.listenerManager.register(new QueryExecutionListener {
       override def onSuccess(funcName: String, qe: QueryExecution, durationNs: Long): Unit = {
         val plan = qe.executedPlan
@@ -162,6 +178,29 @@ object RunReport {
       }
     })
   }
+
+  /** Shuffle volume over every task in the session, from task metrics rather
+    * than from the UI.
+    *
+    * This is what a multi-node deployment would put on the wire and a
+    * single-node one puts on `spark.local.dir`. The manuscript states at
+    * `joinless_v10_Jul_31.tex:1264` that the wall-clock effect of that
+    * difference "remains an empirical question"; the volume is not a question,
+    * and measuring it bounds the part of the answer that arithmetic can supply.
+    *
+    * Read bytes are split into local and remote. On a single node everything is
+    * local, so `remote` is expected to be zero — which is the point: the whole
+    * of `local` is what would become remote elsewhere. */
+  final case class ShuffleTotals(bytesWritten: Long, recordsWritten: Long,
+                                 localBytesRead: Long, remoteBytesRead: Long,
+                                 recordsRead: Long) {
+    def bytesRead: Long = localBytesRead + remoteBytesRead
+  }
+
+  private var shWritten, shRecWritten, shLocalRead, shRemoteRead, shRecRead = 0L
+
+  def shuffleTotals: ShuffleTotals =
+    ShuffleTotals(shWritten, shRecWritten, shLocalRead, shRemoteRead, shRecRead)
 
   /** Broadcast milliseconds over every execution recorded so far in this
     * session.
@@ -241,5 +280,14 @@ object RunReport {
     println(f"exchange_count= ${c.exchanges}")
     println(f"bcast_ms      = ${bc.totalMs}")
     println(f"bcast_bytes   = ${bc.bytes}")
+    // Emitted last so that a run's shuffle volume is on the same line-oriented
+    // record as everything else the sweep scripts parse.
+    val sh = shuffleTotals
+    println(f"shuffle_write_bytes   = ${sh.bytesWritten}")
+    println(f"shuffle_write_records = ${sh.recordsWritten}")
+    println(f"shuffle_read_bytes    = ${sh.bytesRead}")
+    println(f"shuffle_read_local    = ${sh.localBytesRead}")
+    println(f"shuffle_read_remote   = ${sh.remoteBytesRead}")
+    println(f"shuffle_read_records  = ${sh.recordsRead}")
   }
 }

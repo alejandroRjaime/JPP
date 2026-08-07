@@ -1327,3 +1327,116 @@ measurements say that within that domain the pattern wins on the whole range onl
 with four dimensions and no selective predicate, and loses across most of it for a query with
 two selective predicates. A domain stated as a size range alone does not capture that; the
 crossover depends on the query at least as strongly as on the dimension size.
+
+---
+
+## 27. Shuffle volume, and what it would cost on a network (Task L)
+
+The manuscript states at `joinless_v10_Jul_31.tex:1264`:
+
+> "To isolate the effect of the physical execution pattern from cluster-orchestration
+> variance, all experiments are conducted on a single node. In a multi-node deployment
+> shuffle traffic would traverse the network rather than local storage; the resulting
+> wall-clock effect nonetheless **remains an empirical question**, because broadcast,
+> coordination, skew, scheduling and scaling overheads would also change."
+
+The wall-clock effect is indeed a question. The **volume** is not, and it was never measured.
+This measures it, so that the part of the answer arithmetic can supply is on the record.
+
+```bash
+./scripts/run_shuffle_bytes.sh ~/ssb_synth
+python3 scripts/summarize_shuffle.py results/shuffle_bytes.csv
+```
+
+60 runs: 4 queries × 3 strategies × 5 repetitions, interleaved, first discarded. Numbers come
+from Spark's task metrics through a `SparkListener` in `RunReport` — not from the UI and not
+from parsing an event log afterwards. Equivalence held on all four queries.
+
+### 27.1 Measured shuffle volume
+
+| Query | Pattern | BHJ | SMJ | SMJ ÷ pattern |
+|---|---:|---:|---:|---:|
+| Q1 | 2,480,993 B | 3,644,386 B | 57,519,979,126 B | 23,184× |
+| Q2 | 645,557 B | 933,433 B | 2,213,876,635 B | 3,429× |
+| Q3 | 4,266,648 B | 6,656,238 B | 23,539,575,679 B | 5,517× |
+| Q4 | 2,480,993 B | 3,644,386 B | 20,799,410,077 B | 8,384× |
+
+`shuffle_read_remote` is **zero in all sixty runs**. On a single node every shuffle read is
+local, which is the finding rather than a limitation of it: the whole of this volume is what
+would become network traffic in a distributed deployment.
+
+**The separation is binary, not graded.** The pattern and the Broadcast Hash Join sit in
+megabytes and differ from each other by about 1.5×; the Sort-Merge Join sits in tens of
+gigabytes. Both of the first two shuffle only the final aggregation; only the Sort-Merge Join
+redistributes the fact table, once per dimension.
+
+### 27.2 Projection — NOT a measurement
+
+Transfer time for that volume at the effective rates the paper measured: a 125 MB/s line rate
+at 88–91% (`:1276-1277`, `:1933`), i.e. 110.0–113.75 MB/s.
+
+| Query | Strategy | Volume (GB) | Projected @91% (s) | Projected @88% (s) | Measured single-node (s) | Projected ÷ measured |
+|---|---|---:|---:|---:|---:|---:|
+| Q1 | pattern | 0.002 | 0.02 | 0.02 | 19.82 | 0.001× |
+| Q1 | BHJ | 0.004 | 0.03 | 0.03 | 28.19 | 0.001× |
+| Q1 | **SMJ** | **57.520** | **505.7** | **522.9** | 174.86 | **2.9×** |
+| Q2 | pattern | 0.001 | 0.01 | 0.01 | 18.02 | 0.000× |
+| Q2 | BHJ | 0.001 | 0.01 | 0.01 | 13.00 | 0.001× |
+| Q2 | SMJ | 2.214 | 19.5 | 20.1 | 23.89 | 0.8× |
+| Q3 | pattern | 0.004 | 0.04 | 0.04 | 19.94 | 0.002× |
+| Q3 | BHJ | 0.007 | 0.06 | 0.06 | 23.00 | 0.003× |
+| Q3 | **SMJ** | **23.540** | **206.9** | **214.0** | 78.62 | **2.6×** |
+| Q4 | pattern | 0.002 | 0.02 | 0.02 | 16.07 | 0.001× |
+| Q4 | BHJ | 0.004 | 0.03 | 0.03 | 24.49 | 0.001× |
+| Q4 | **SMJ** | **20.799** | **182.9** | **189.1** | 79.38 | **2.3×** |
+
+**What the projection assumes**, all three of which move it:
+
+- every shuffle byte crosses the link. With E executors roughly 1/E of reads would be
+  node-local, so at E=2 about half this volume would stay local and the projection is
+  correspondingly high;
+- the link runs at the paper's measured effective rates;
+- transfer does not overlap compute, which it would.
+
+**What it excludes**, and therefore under-counts: broadcast, coordination, skew, scheduling and
+scaling — the five overheads the manuscript itself names at `:1264`.
+
+It is therefore **neither a strict upper nor a strict lower bound**. It is a scale indicator
+for a cost the single-node measurement does not charge at all.
+
+### 27.3 What follows
+
+1. **For the Sort-Merge Join the effect is large and the manuscript's intuition is
+   substantiated.** On Q1 the projected transfer alone — 505.7 s — is **2.9× the entire
+   measured single-node runtime** of 174.86 s. On Q3 and Q4 it is 2.6× and 2.3×. A multi-node
+   deployment would not shift this baseline slightly; the transfer would dominate it.
+2. **For the Broadcast Hash Join the effect is immaterial.** Its shuffle volume is 3.6 MB on
+   Q1, projecting to 0.03 s against a 28.19 s runtime — about one part in a thousand.
+3. **Therefore the network projection does not move the paper's headline range.** The
+   1.36×-faster-to-1.67×-slower range at `:200` and `:1566` is stated *against the Broadcast
+   Hash Join*, and both sides of that comparison shuffle single-digit megabytes. Whatever a
+   multi-node deployment would do to those two, it would do to both.
+4. **Where it would move things is the Sort-Merge Join range**, the 1.04×-to-7.9× at the same
+   lines. Q2 is the query where SMJ shuffles least (2.2 GB, projecting to 0.8× of its
+   measured time) and Q1 the one where it shuffles most (57.5 GB, 2.9×), so a network
+   deployment would widen that range rather than shift it uniformly.
+
+The honest summary for the paper: the claim at `:1264` is correct, and its practical weight
+falls almost entirely on one of the two baselines. Saying so is stronger than leaving it as
+an open question, because it identifies which comparison the single-node setup flatters and
+which it does not.
+
+### 27.4 What this section does not establish
+
+- **No multi-node deployment was run.** Every number in §27.1 is single-node; §27.2 is
+  arithmetic over it. The wall-clock effect the manuscript calls an empirical question
+  remains one — this bounds its volume term only.
+- **Executor count is not modelled.** The projection assumes all shuffle traffic crosses the
+  link. A two-node deployment would keep roughly half of it local, a four-node deployment
+  three quarters remote; the table would need one column per topology to say more.
+- **Overlap is not modelled.** Spark overlaps shuffle transfer with compute, so even the
+  volume term would not be paid serially.
+- **The link is the paper's own**, 1 Gbit. A 10 or 25 Gbit interconnect — ordinary in a
+  cluster that would run this workload — divides every projected figure by 10 or 25, which
+  would leave even the Sort-Merge Join's 505.7 s at 50.6 s or 20.2 s. **The conclusion of
+  §27.3 is specific to a 1 Gbit link and does not survive a faster one.**
